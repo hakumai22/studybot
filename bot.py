@@ -556,26 +556,44 @@ async def collect_move_members(guild: discord.Guild, config: dict) -> tuple[disc
     return study_channel, filtered_members
 
 
-async def move_game_to_study(guild: discord.Guild, config: dict) -> int:
-    study_channel, members = await collect_move_members(guild, config)
+async def move_members(members: list[discord.Member], target_channel: discord.VoiceChannel) -> dict[str, int]:
+    result = {"moved": 0, "forbidden": 0, "http_error": 0}
     for member in members:
-        await member.move_to(study_channel)
-    return len(members)
+        try:
+            await member.move_to(target_channel)
+            result["moved"] += 1
+        except discord.Forbidden:
+            result["forbidden"] += 1
+        except discord.HTTPException:
+            result["http_error"] += 1
+    return result
 
 
-async def move_all_study_to_game(guild: discord.Guild, config: dict) -> int:
+def format_move_result(result: dict[str, int]) -> str:
+    failed = int(result.get("forbidden", 0)) + int(result.get("http_error", 0))
+    text = f"移動: {int(result.get('moved', 0))}人"
+    if failed > 0:
+        text += f" 失敗: {failed}人"
+        text += f" (権限不足: {int(result.get('forbidden', 0))}人 / 通信エラー: {int(result.get('http_error', 0))}人)"
+    return text
+
+
+async def move_game_to_study(guild: discord.Guild, config: dict) -> dict[str, int]:
+    study_channel, members = await collect_move_members(guild, config)
+    return await move_members(members, study_channel)
+
+
+async def move_all_study_to_game(guild: discord.Guild, config: dict) -> dict[str, int]:
     game_channel_id = config.get("game_channel_id")
     study_channel_id = config.get("study_channel_id")
     if not game_channel_id or not study_channel_id:
-        return 0
+        return {"moved": 0, "forbidden": 0, "http_error": 0}
     study_channel = await resolve_guild_channel(guild, int(study_channel_id))
     game_channel = await resolve_guild_channel(guild, int(game_channel_id))
     if not isinstance(study_channel, discord.VoiceChannel) or not isinstance(game_channel, discord.VoiceChannel):
         raise RuntimeError("game_channel_id または study_channel_id が不正です")
     members = list(study_channel.members)
-    for member in members:
-        await member.move_to(game_channel)
-    return len(members)
+    return await move_members(members, game_channel)
 
 
 async def send_message(guild: discord.Guild, config: dict) -> None:
@@ -751,20 +769,11 @@ async def send_voice_members(
     if not members:
         await interaction.response.send_message("移動対象メンバーがいません。", ephemeral=True)
         return
-    moved = 0
-    failed_count = 0
-    for member in members:
-        try:
-            await member.move_to(to_channel)
-            moved += 1
-        except (discord.Forbidden, discord.HTTPException):
-            failed_count += 1
-    result_message = f"{moved}人を {from_channel.mention} から {to_channel.mention} へ移動しました。"
-    if failed_count > 0:
-        result_message += f" 失敗: {failed_count}人"
+    result = await move_members(members, to_channel)
+    result_message = f"{from_channel.mention} から {to_channel.mention} へ移動しました。{format_move_result(result)}"
     if excluded_ids:
         result_message += f" 除外指定: {len(excluded_ids)}人"
-    await interaction.response.send_message(result_message, ephemeral=True)
+    await interaction.response.send_message(result_message)
 
 
 @config_group.command(name="show")
@@ -1107,8 +1116,12 @@ async def config_move_study_to_game(interaction: discord.Interaction) -> None:
         await interaction.response.send_message("サーバー情報を取得できませんでした。", ephemeral=True)
         return
     config = get_guild_config(guild_id)
-    moved = await move_all_study_to_game(guild, config)
-    await interaction.response.send_message(f"{moved}人をSTUDYからGAMEへ移動しました。", ephemeral=True)
+    try:
+        result = await move_all_study_to_game(guild, config)
+    except Exception as error:
+        await interaction.response.send_message(f"実行に失敗しました: {error}", ephemeral=True)
+        return
+    await interaction.response.send_message(f"STUDYからGAMEへ移動しました。{format_move_result(result)}")
 
 
 @config_group.command(name="move_game_to_study")
@@ -1124,11 +1137,11 @@ async def config_move_game_to_study(interaction: discord.Interaction) -> None:
         return
     config = get_guild_config(guild_id)
     try:
-        moved = await move_game_to_study(guild, config)
+        result = await move_game_to_study(guild, config)
     except Exception as error:
         await interaction.response.send_message(f"実行に失敗しました: {error}", ephemeral=True)
         return
-    await interaction.response.send_message(f"{moved}人をGAME/ANYTHINGOK_VOICEからSTUDYへ移動しました。", ephemeral=True)
+    await interaction.response.send_message(f"GAME/ANYTHINGOK_VOICEからSTUDYへ移動しました。{format_move_result(result)}")
 
 
 @config_group.command(name="dry_run")
@@ -1172,12 +1185,12 @@ async def config_run_now(interaction: discord.Interaction) -> None:
         return
     config = get_guild_config(guild_id)
     try:
-        moved = await move_game_to_study(guild, config)
+        result = await move_game_to_study(guild, config)
         await send_message(guild, config)
     except Exception as error:
         await interaction.response.send_message(f"実行に失敗しました: {error}", ephemeral=True)
         return
-    await interaction.response.send_message(f"手動実行しました。移動: {moved}人、通知送信: 1件", ephemeral=True)
+    await interaction.response.send_message(f"手動実行しました。{format_move_result(result)} 通知送信: 1件")
 
 
 @study_group.command(name="me")

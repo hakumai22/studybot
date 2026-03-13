@@ -6,9 +6,13 @@
 
 - `config` グループのうち設定変更系は管理者権限が必要です。
 - `config show`、`study me`、`study rank` は一般メンバーも実行できます。
-- 返信は基本的に実行者のみ表示です。
+- 返信は基本的に実行者のみ表示です（`/send` と移動系コマンドは成功時のみ公開表示）。
 
 ## 全コマンド一覧
+
+### `/send`
+
+- [`/send from_channel:<voice_channel> to_channel:<voice_channel> [except_users]`](#send)
 
 ### `/config`
 
@@ -57,6 +61,14 @@
 - 目的: 現在のギルド設定を一覧表示。
 - 主な確認項目: `notify_time`、`timezone`、`excluded_role_ids`、`aggregation_excluded_user_ids`、`maintenance_enabled`、`maintenance_until_epoch`、週次設定。
 - 使いどころ: 設定変更後の確認、障害調査時の現状把握。
+
+<a id="send"></a>
+### `/send from_channel:<voice_channel> to_channel:<voice_channel> [except_users]`
+
+- 目的: 指定ボイスチャンネル間でメンバーを移動。
+- 仕様: `except_users` はメンションまたはユーザーIDを空白/カンマ区切りで複数指定可能。
+- 仕様: 成功時は公開表示。失敗時は実行者のみに表示。失敗内訳（権限不足/通信エラー）を表示。
+- 例: `/send from_channel:GAME to_channel:STUDY except_users:@Taro,123456789012345678`
 
 <a id="config-set-general"></a>
 ### `/config set_general channel:<text_channel>`
@@ -220,6 +232,7 @@
 ### `/config move_study_to_game`
 
 - 目的: `STUDY` 参加者を `GAME` へ即時移動。
+- 仕様: 成功時は公開表示。失敗時は実行者のみに表示。失敗内訳（権限不足/通信エラー）を表示。
 - 使いどころ: 勉強会終了時の一括移動。
 - 例: `/config move_study_to_game`
 
@@ -228,6 +241,7 @@
 
 - 目的: `GAME` と `ANYTHINGOK_VOICE` の参加者を `STUDY` へ即時移動。
 - 仕様: 重複ユーザーは1回だけ移動、移動除外ロールは対象外。
+- 仕様: 成功時は公開表示。失敗時は実行者のみに表示。失敗内訳（権限不足/通信エラー）を表示。
 - 例: `/config move_game_to_study`
 
 <a id="config-dry-run"></a>
@@ -242,6 +256,7 @@
 
 - 目的: 手動で「移動 + 通知送信」を即時実行。
 - 仕様: `move_game_to_study` と `send_message` を順番に実施。
+- 仕様: 成功時は公開表示。失敗時は実行者のみに表示。移動結果は失敗内訳（権限不足/通信エラー）を表示。
 - 例: `/config run_now`
 
 ## `/study` コマンド
