@@ -173,6 +173,11 @@ def end_study_session(guild_id: int, user_id: int, ended_at: datetime.datetime, 
         )
         connection.commit()
     started_at = datetime.datetime.fromtimestamp(int(row["started_at"]), tz=datetime.timezone.utc)
+    
+    # 1回のセッションが8時間(28800秒)を超える場合はスリープ等とみなし記録を無効化する
+    if (ended_at - started_at).total_seconds() > 8 * 3600:
+        return
+
     seconds_by_date = split_seconds_by_local_date(started_at, ended_at, timezone_name, reset_time)
     add_study_seconds(guild_id, user_id, seconds_by_date)
 
@@ -312,6 +317,7 @@ def get_guild_config(guild_id: int) -> dict:
     entry.setdefault("notify_role_id", None)
     entry.setdefault("excluded_role_ids", [])
     entry.setdefault("aggregation_excluded_user_ids", [])
+    entry.setdefault("command_allowed_user_ids", [])
     entry.setdefault("maintenance_enabled", False)
     entry.setdefault("maintenance_until_epoch", 0)
     entry.setdefault("error_channel_id", 1370726579021283331)
@@ -382,6 +388,16 @@ def resolve_maintenance_enabled(guild_id: int, config: dict) -> bool:
 
 def get_excluded_user_id_set(config: dict) -> set[int]:
     return {int(item) for item in config.get("aggregation_excluded_user_ids", [])}
+
+
+def get_command_allowed_user_id_set(config: dict) -> set[int]:
+    allowed_ids: set[int] = set()
+    for item in config.get("command_allowed_user_ids", []):
+        try:
+            allowed_ids.add(int(item))
+        except (TypeError, ValueError):
+            continue
+    return allowed_ids
 
 
 def get_week_key(now_local: datetime.datetime) -> str:
@@ -570,8 +586,12 @@ async def move_members(members: list[discord.Member], target_channel: discord.Vo
     return result
 
 
+def get_move_failed_count(result: dict[str, int]) -> int:
+    return int(result.get("forbidden", 0)) + int(result.get("http_error", 0))
+
+
 def format_move_result(result: dict[str, int]) -> str:
-    failed = int(result.get("forbidden", 0)) + int(result.get("http_error", 0))
+    failed = get_move_failed_count(result)
     text = f"移動: {int(result.get('moved', 0))}人"
     if failed > 0:
         text += f" 失敗: {failed}人"
@@ -692,9 +712,9 @@ async def on_ready() -> None:
 @tree.error
 async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError) -> None:
     if isinstance(error, app_commands.MissingPermissions):
-        user_message = "管理者権限が必要です。"
+        user_message = "管理者または許可ユーザーのみ実行できます。"
     elif isinstance(error, app_commands.CheckFailure):
-        user_message = "このコマンドを実行する権限がありません。"
+        user_message = "管理者または許可ユーザーのみ実行できます。"
     else:
         user_message = "コマンドの実行中にエラーが発生しました。"
     try:
@@ -728,8 +748,49 @@ def require_guild(interaction: discord.Interaction) -> int | None:
     return interaction.guild_id
 
 
+def has_command_permission(interaction: discord.Interaction) -> bool:
+    if not interaction.guild_id:
+        return True
+    user = interaction.user
+    guild = interaction.guild
+    member = user if isinstance(user, discord.Member) else None
+    if member is None and guild is not None:
+        member = guild.get_member(user.id)
+    if member is not None and member.guild_permissions.administrator:
+        return True
+    config = get_guild_config(interaction.guild_id)
+    return int(user.id) in get_command_allowed_user_id_set(config)
+
+
+@tree.command(name="say", description="ボットから任意のメッセージを送信します")
+@app_commands.check(has_command_permission)
+@app_commands.describe(message="送信するメッセージ", channel="送信先チャンネル（省略時は現在のチャンネル）")
+async def say_message(
+    interaction: discord.Interaction,
+    message: str,
+    channel: discord.TextChannel | discord.Thread | discord.VoiceChannel | None = None
+) -> None:
+    guild_id = require_guild(interaction)
+    if not guild_id:
+        await interaction.response.send_message("サーバー内で実行してください。", ephemeral=True)
+        return
+    
+    target_channel = channel or interaction.channel
+    if target_channel is None or not isinstance(target_channel, discord.abc.Messageable):
+        await interaction.response.send_message("メッセージを送信できないチャンネルです。", ephemeral=True)
+        return
+        
+    try:
+        await target_channel.send(message)
+        await interaction.response.send_message("メッセージを送信しました。", ephemeral=True)
+    except discord.Forbidden:
+        await interaction.response.send_message("メッセージを送信する権限がありません。", ephemeral=True)
+    except discord.HTTPException as error:
+        await interaction.response.send_message(f"エラーが発生しました: {error}", ephemeral=True)
+
+
 @tree.command(name="send", description="ボイスチャンネル間でメンバーを移動します")
-@app_commands.checks.has_permissions(administrator=True)
+@app_commands.check(has_command_permission)
 @app_commands.describe(from_channel="元のチャンネル", to_channel="送り先チャンネル", except_users="送らないユーザー(メンション/IDを空白かカンマ区切りで複数指定)")
 async def send_voice_members(
     interaction: discord.Interaction,
@@ -772,9 +833,10 @@ async def send_voice_members(
         return
     result = await move_members(members, to_channel)
     result_message = f"{from_channel.mention} から {to_channel.mention} へ移動しました。{format_move_result(result)}"
+    failed = get_move_failed_count(result)
     if excluded_ids:
         result_message += f" 除外指定: {len(excluded_ids)}人"
-    await interaction.response.send_message(result_message)
+    await interaction.response.send_message(result_message, ephemeral=failed > 0)
 
 
 @config_group.command(name="show")
@@ -797,6 +859,7 @@ async def config_show(interaction: discord.Interaction) -> None:
                 f"STUDY: {config['study_channel_id']}",
                 f"EXCLUDED_ROLE_IDS: {','.join(str(item) for item in config['excluded_role_ids'])}",
                 f"AGGREGATION_EXCLUDED_USER_IDS: {','.join(str(item) for item in config['aggregation_excluded_user_ids'])}",
+                f"COMMAND_ALLOWED_USER_IDS: {','.join(str(item) for item in config['command_allowed_user_ids'])}",
                 f"MAINTENANCE_ENABLED: {config['maintenance_enabled']}",
                 f"MAINTENANCE_UNTIL_EPOCH: {config['maintenance_until_epoch']}",
                 f"ERROR_CHANNEL_ID: {config['error_channel_id']}",
@@ -812,7 +875,7 @@ async def config_show(interaction: discord.Interaction) -> None:
 
 
 @config_group.command(name="set_general")
-@app_commands.checks.has_permissions(administrator=True)
+@app_commands.check(has_command_permission)
 async def config_set_general(interaction: discord.Interaction, channel: discord.TextChannel) -> None:
     guild_id = require_guild(interaction)
     if not guild_id:
@@ -823,7 +886,7 @@ async def config_set_general(interaction: discord.Interaction, channel: discord.
 
 
 @config_group.command(name="set_game")
-@app_commands.checks.has_permissions(administrator=True)
+@app_commands.check(has_command_permission)
 async def config_set_game(interaction: discord.Interaction, channel: discord.VoiceChannel) -> None:
     guild_id = require_guild(interaction)
     if not guild_id:
@@ -834,7 +897,7 @@ async def config_set_game(interaction: discord.Interaction, channel: discord.Voi
 
 
 @config_group.command(name="set_anythingok_voice")
-@app_commands.checks.has_permissions(administrator=True)
+@app_commands.check(has_command_permission)
 async def config_set_anythingok_voice(interaction: discord.Interaction, channel: discord.VoiceChannel) -> None:
     guild_id = require_guild(interaction)
     if not guild_id:
@@ -845,7 +908,7 @@ async def config_set_anythingok_voice(interaction: discord.Interaction, channel:
 
 
 @config_group.command(name="set_study")
-@app_commands.checks.has_permissions(administrator=True)
+@app_commands.check(has_command_permission)
 async def config_set_study(interaction: discord.Interaction, channel: discord.VoiceChannel) -> None:
     guild_id = require_guild(interaction)
     if not guild_id:
@@ -856,7 +919,7 @@ async def config_set_study(interaction: discord.Interaction, channel: discord.Vo
 
 
 @config_group.command(name="set_time")
-@app_commands.checks.has_permissions(administrator=True)
+@app_commands.check(has_command_permission)
 async def config_set_time(interaction: discord.Interaction, time: str) -> None:
     guild_id = require_guild(interaction)
     if not guild_id:
@@ -872,7 +935,7 @@ async def config_set_time(interaction: discord.Interaction, time: str) -> None:
 
 
 @config_group.command(name="set_timezone")
-@app_commands.checks.has_permissions(administrator=True)
+@app_commands.check(has_command_permission)
 async def config_set_timezone(interaction: discord.Interaction, timezone: str) -> None:
     guild_id = require_guild(interaction)
     if not guild_id:
@@ -888,7 +951,7 @@ async def config_set_timezone(interaction: discord.Interaction, timezone: str) -
 
 
 @config_group.command(name="set_message")
-@app_commands.checks.has_permissions(administrator=True)
+@app_commands.check(has_command_permission)
 async def config_set_message(interaction: discord.Interaction, message: str) -> None:
     guild_id = require_guild(interaction)
     if not guild_id:
@@ -899,7 +962,7 @@ async def config_set_message(interaction: discord.Interaction, message: str) -> 
 
 
 @config_group.command(name="set_reset_time")
-@app_commands.checks.has_permissions(administrator=True)
+@app_commands.check(has_command_permission)
 async def config_set_reset_time(interaction: discord.Interaction, time: str) -> None:
     guild_id = require_guild(interaction)
     if not guild_id:
@@ -915,7 +978,7 @@ async def config_set_reset_time(interaction: discord.Interaction, time: str) -> 
 
 
 @config_group.command(name="set_notify_role")
-@app_commands.checks.has_permissions(administrator=True)
+@app_commands.check(has_command_permission)
 async def config_set_notify_role(interaction: discord.Interaction, role: discord.Role) -> None:
     guild_id = require_guild(interaction)
     if not guild_id:
@@ -926,7 +989,7 @@ async def config_set_notify_role(interaction: discord.Interaction, role: discord
 
 
 @config_group.command(name="clear_notify_role")
-@app_commands.checks.has_permissions(administrator=True)
+@app_commands.check(has_command_permission)
 async def config_clear_notify_role(interaction: discord.Interaction) -> None:
     guild_id = require_guild(interaction)
     if not guild_id:
@@ -937,7 +1000,7 @@ async def config_clear_notify_role(interaction: discord.Interaction) -> None:
 
 
 @config_group.command(name="add_exclude_role")
-@app_commands.checks.has_permissions(administrator=True)
+@app_commands.check(has_command_permission)
 async def config_add_exclude_role(interaction: discord.Interaction, role: discord.Role) -> None:
     guild_id = require_guild(interaction)
     if not guild_id:
@@ -952,7 +1015,7 @@ async def config_add_exclude_role(interaction: discord.Interaction, role: discor
 
 
 @config_group.command(name="remove_exclude_role")
-@app_commands.checks.has_permissions(administrator=True)
+@app_commands.check(has_command_permission)
 async def config_remove_exclude_role(interaction: discord.Interaction, role: discord.Role) -> None:
     guild_id = require_guild(interaction)
     if not guild_id:
@@ -965,7 +1028,7 @@ async def config_remove_exclude_role(interaction: discord.Interaction, role: dis
 
 
 @config_group.command(name="clear_exclude_roles")
-@app_commands.checks.has_permissions(administrator=True)
+@app_commands.check(has_command_permission)
 async def config_clear_exclude_roles(interaction: discord.Interaction) -> None:
     guild_id = require_guild(interaction)
     if not guild_id:
@@ -976,7 +1039,7 @@ async def config_clear_exclude_roles(interaction: discord.Interaction) -> None:
 
 
 @config_maintenance_group.command(name="set")
-@app_commands.checks.has_permissions(administrator=True)
+@app_commands.check(has_command_permission)
 async def config_set_maintenance(interaction: discord.Interaction, enabled: bool) -> None:
     guild_id = require_guild(interaction)
     if not guild_id:
@@ -987,7 +1050,7 @@ async def config_set_maintenance(interaction: discord.Interaction, enabled: bool
 
 
 @config_maintenance_group.command(name="set_for")
-@app_commands.checks.has_permissions(administrator=True)
+@app_commands.check(has_command_permission)
 async def config_set_maintenance_for(interaction: discord.Interaction, minutes: app_commands.Range[int, 1, 10080]) -> None:
     guild_id = require_guild(interaction)
     if not guild_id:
@@ -1006,8 +1069,29 @@ async def config_set_maintenance_for(interaction: discord.Interaction, minutes: 
     )
 
 
+@config_maintenance_group.command(name="set_today")
+@app_commands.check(has_command_permission)
+async def config_set_maintenance_today(interaction: discord.Interaction) -> None:
+    guild_id = require_guild(interaction)
+    if not guild_id:
+        await interaction.response.send_message("サーバー内で実行してください。", ephemeral=True)
+        return
+    config = get_guild_config(guild_id)
+    timezone_name = config.get("timezone", "Asia/Tokyo")
+    timezone = get_timezone(timezone_name)
+    now_local = datetime.datetime.now(timezone)
+    tomorrow_local = (now_local + datetime.timedelta(days=1)).date()
+    until_local_dt = datetime.datetime.combine(tomorrow_local, datetime.time(hour=0, minute=0), tzinfo=timezone)
+    until_epoch = int(until_local_dt.astimezone(datetime.timezone.utc).timestamp())
+    update_guild_config(guild_id, {"maintenance_enabled": True, "maintenance_until_epoch": until_epoch})
+    await interaction.response.send_message(
+        f"本日中は勉強通知・転送を停止します。再開予定: {until_local_dt.strftime('%Y-%m-%d %H:%M')} ({timezone_name})",
+        ephemeral=True
+    )
+
+
 @config_aggregate_group.command(name="add_exclude_user")
-@app_commands.checks.has_permissions(administrator=True)
+@app_commands.check(has_command_permission)
 async def config_add_exclude_user(interaction: discord.Interaction, user: discord.Member) -> None:
     guild_id = require_guild(interaction)
     if not guild_id:
@@ -1022,7 +1106,7 @@ async def config_add_exclude_user(interaction: discord.Interaction, user: discor
 
 
 @config_aggregate_group.command(name="remove_exclude_user")
-@app_commands.checks.has_permissions(administrator=True)
+@app_commands.check(has_command_permission)
 async def config_remove_exclude_user(interaction: discord.Interaction, user: discord.Member) -> None:
     guild_id = require_guild(interaction)
     if not guild_id:
@@ -1035,7 +1119,7 @@ async def config_remove_exclude_user(interaction: discord.Interaction, user: dis
 
 
 @config_aggregate_group.command(name="clear_exclude_users")
-@app_commands.checks.has_permissions(administrator=True)
+@app_commands.check(has_command_permission)
 async def config_clear_exclude_users(interaction: discord.Interaction) -> None:
     guild_id = require_guild(interaction)
     if not guild_id:
@@ -1046,7 +1130,7 @@ async def config_clear_exclude_users(interaction: discord.Interaction) -> None:
 
 
 @config_group.command(name="set_error_channel")
-@app_commands.checks.has_permissions(administrator=True)
+@app_commands.check(has_command_permission)
 async def config_set_error_channel(interaction: discord.Interaction, channel: discord.TextChannel) -> None:
     guild_id = require_guild(interaction)
     if not guild_id:
@@ -1057,7 +1141,7 @@ async def config_set_error_channel(interaction: discord.Interaction, channel: di
 
 
 @config_group.command(name="clear_error_channel")
-@app_commands.checks.has_permissions(administrator=True)
+@app_commands.check(has_command_permission)
 async def config_clear_error_channel(interaction: discord.Interaction) -> None:
     guild_id = require_guild(interaction)
     if not guild_id:
@@ -1068,7 +1152,7 @@ async def config_clear_error_channel(interaction: discord.Interaction) -> None:
 
 
 @config_group.command(name="set_weekly_period")
-@app_commands.checks.has_permissions(administrator=True)
+@app_commands.check(has_command_permission)
 async def config_set_weekly_period(interaction: discord.Interaction, days: app_commands.Range[int, 1, 31]) -> None:
     guild_id = require_guild(interaction)
     if not guild_id:
@@ -1079,7 +1163,7 @@ async def config_set_weekly_period(interaction: discord.Interaction, days: app_c
 
 
 @config_group.command(name="set_weekly")
-@app_commands.checks.has_permissions(administrator=True)
+@app_commands.check(has_command_permission)
 async def config_set_weekly(interaction: discord.Interaction, weekday: app_commands.Range[int, 0, 6], time: str) -> None:
     guild_id = require_guild(interaction)
     if not guild_id:
@@ -1095,7 +1179,7 @@ async def config_set_weekly(interaction: discord.Interaction, weekday: app_comma
 
 
 @config_group.command(name="set_weekly_enabled")
-@app_commands.checks.has_permissions(administrator=True)
+@app_commands.check(has_command_permission)
 async def config_set_weekly_enabled(interaction: discord.Interaction, enabled: bool) -> None:
     guild_id = require_guild(interaction)
     if not guild_id:
@@ -1106,7 +1190,7 @@ async def config_set_weekly_enabled(interaction: discord.Interaction, enabled: b
 
 
 @config_group.command(name="move_study_to_game")
-@app_commands.checks.has_permissions(administrator=True)
+@app_commands.check(has_command_permission)
 async def config_move_study_to_game(interaction: discord.Interaction) -> None:
     guild_id = require_guild(interaction)
     if not guild_id:
@@ -1122,11 +1206,15 @@ async def config_move_study_to_game(interaction: discord.Interaction) -> None:
     except Exception as error:
         await interaction.response.send_message(f"実行に失敗しました: {error}", ephemeral=True)
         return
-    await interaction.response.send_message(f"STUDYからGAMEへ移動しました。{format_move_result(result)}")
+    failed = get_move_failed_count(result)
+    await interaction.response.send_message(
+        f"STUDYからGAMEへ移動しました。{format_move_result(result)}",
+        ephemeral=failed > 0
+    )
 
 
 @config_group.command(name="move_game_to_study")
-@app_commands.checks.has_permissions(administrator=True)
+@app_commands.check(has_command_permission)
 async def config_move_game_to_study(interaction: discord.Interaction) -> None:
     guild_id = require_guild(interaction)
     if not guild_id:
@@ -1142,11 +1230,15 @@ async def config_move_game_to_study(interaction: discord.Interaction) -> None:
     except Exception as error:
         await interaction.response.send_message(f"実行に失敗しました: {error}", ephemeral=True)
         return
-    await interaction.response.send_message(f"GAME/ANYTHINGOK_VOICEからSTUDYへ移動しました。{format_move_result(result)}")
+    failed = get_move_failed_count(result)
+    await interaction.response.send_message(
+        f"GAME/ANYTHINGOK_VOICEからSTUDYへ移動しました。{format_move_result(result)}",
+        ephemeral=failed > 0
+    )
 
 
 @config_group.command(name="dry_run")
-@app_commands.checks.has_permissions(administrator=True)
+@app_commands.check(has_command_permission)
 async def config_dry_run(interaction: discord.Interaction) -> None:
     guild_id = require_guild(interaction)
     if not guild_id:
@@ -1174,7 +1266,7 @@ async def config_dry_run(interaction: discord.Interaction) -> None:
 
 
 @config_group.command(name="run_now")
-@app_commands.checks.has_permissions(administrator=True)
+@app_commands.check(has_command_permission)
 async def config_run_now(interaction: discord.Interaction) -> None:
     guild_id = require_guild(interaction)
     if not guild_id:
@@ -1191,7 +1283,11 @@ async def config_run_now(interaction: discord.Interaction) -> None:
     except Exception as error:
         await interaction.response.send_message(f"実行に失敗しました: {error}", ephemeral=True)
         return
-    await interaction.response.send_message(f"手動実行しました。{format_move_result(result)} 通知送信: 1件")
+    failed = get_move_failed_count(result)
+    await interaction.response.send_message(
+        f"手動実行しました。{format_move_result(result)} 通知送信: 1件",
+        ephemeral=failed > 0
+    )
 
 
 @study_group.command(name="me")

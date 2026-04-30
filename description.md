@@ -4,11 +4,14 @@
 
 ## 前提
 
-- `config` グループのうち設定変更系は管理者権限が必要です。
+- `config` グループのうち設定変更系は管理者権限、または `config.json` の `command_allowed_user_ids` に含まれるユーザーのみ実行できます。
 - `config show`、`study me`、`study rank` は一般メンバーも実行できます。
 - 返信は基本的に実行者のみ表示です（`/send` と移動系コマンドは成功時のみ公開表示）。
 
 ## 全コマンド一覧
+
+### 他コマンド
+- [`/say message:<text> [channel:<channel>]`](#say)
 
 ### `/send`
 
@@ -16,34 +19,51 @@
 
 ### `/config`
 
-- [`/config show`](#config-show)
-- [`/config set_general channel:<text_channel>`](#config-set-general)
-- [`/config set_game channel:<voice_channel>`](#config-set-game)
-- [`/config set_anythingok_voice channel:<voice_channel>`](#config-set-anythingok-voice)
-- [`/config set_study channel:<voice_channel>`](#config-set-study)
-- [`/config set_time time:<HH:MM>`](#config-set-time)
-- [`/config set_timezone timezone:<tz_name>`](#config-set-timezone)
-- [`/config set_message message:<text>`](#config-set-message)
-- [`/config set_reset_time time:<HH:MM>`](#config-set-reset-time)
-- [`/config set_notify_role role:<role>`](#config-set-notify-role)
-- [`/config clear_notify_role`](#config-clear-notify-role)
-- [`/config add_exclude_role role:<role>`](#config-add-exclude-role)
-- [`/config remove_exclude_role role:<role>`](#config-remove-exclude-role)
-- [`/config clear_exclude_roles`](#config-clear-exclude-roles)
-- [`/config maintenance set enabled:<true|false>`](#config-maintenance-set)
-- [`/config maintenance set_for minutes:<1-10080>`](#config-maintenance-set-for)
-- [`/config aggregate add_exclude_user user:<member>`](#config-aggregate-add-exclude-user)
-- [`/config aggregate remove_exclude_user user:<member>`](#config-aggregate-remove-exclude-user)
-- [`/config aggregate clear_exclude_users`](#config-aggregate-clear-exclude-users)
-- [`/config set_error_channel channel:<text_channel>`](#config-set-error-channel)
-- [`/config clear_error_channel`](#config-clear-error-channel)
-- [`/config set_weekly_period days:<1-31>`](#config-set-weekly-period)
-- [`/config set_weekly weekday:<0-6> time:<HH:MM>`](#config-set-weekly)
-- [`/config set_weekly_enabled enabled:<true|false>`](#config-set-weekly-enabled)
-- [`/config move_study_to_game`](#config-move-study-to-game)
-- [`/config move_game_to_study`](#config-move-game-to-study)
-- [`/config dry_run`](#config-dry-run)
-- [`/config run_now`](#config-run-now)
+- [studybot コマンド説明](#studybot-コマンド説明)
+  - [前提](#前提)
+  - [全コマンド一覧](#全コマンド一覧)
+    - [他コマンド](#他コマンド)
+    - [`/send`](#send)
+    - [`/config`](#config)
+    - [`/study`](#study)
+  - [`/config` コマンド](#config-コマンド)
+    - [`/config show`](#config-show)
+    - [`/say message:<text> [channel:<channel>]`](#say-messagetext-channelchannel)
+    - [`/send from_channel:<voice_channel> to_channel:<voice_channel> [except_users]`](#send-from_channelvoice_channel-to_channelvoice_channel-except_users)
+    - [`/config set_general channel:<text_channel>`](#config-set_general-channeltext_channel)
+    - [`/config set_game channel:<voice_channel>`](#config-set_game-channelvoice_channel)
+    - [`/config set_anythingok_voice channel:<voice_channel>`](#config-set_anythingok_voice-channelvoice_channel)
+    - [`/config set_study channel:<voice_channel>`](#config-set_study-channelvoice_channel)
+    - [`/config set_time time:<HH:MM>`](#config-set_time-timehhmm)
+    - [`/config set_timezone timezone:<tz_name>`](#config-set_timezone-timezonetz_name)
+    - [`/config set_message message:<text>`](#config-set_message-messagetext)
+    - [`/config set_reset_time time:<HH:MM>`](#config-set_reset_time-timehhmm)
+    - [`/config set_notify_role role:<role>`](#config-set_notify_role-rolerole)
+    - [`/config clear_notify_role`](#config-clear_notify_role)
+    - [`/config add_exclude_role role:<role>`](#config-add_exclude_role-rolerole)
+    - [`/config remove_exclude_role role:<role>`](#config-remove_exclude_role-rolerole)
+    - [`/config clear_exclude_roles`](#config-clear_exclude_roles)
+    - [`/config maintenance set enabled:<true|false>`](#config-maintenance-set-enabledtruefalse)
+    - [`/config maintenance set_for minutes:<1-10080>`](#config-maintenance-set_for-minutes1-10080)
+    - [`/config aggregate add_exclude_user user:<member>`](#config-aggregate-add_exclude_user-usermember)
+    - [`/config aggregate remove_exclude_user user:<member>`](#config-aggregate-remove_exclude_user-usermember)
+    - [`/config aggregate clear_exclude_users`](#config-aggregate-clear_exclude_users)
+    - [`/config set_error_channel channel:<text_channel>`](#config-set_error_channel-channeltext_channel)
+    - [`/config clear_error_channel`](#config-clear_error_channel)
+    - [`/config set_weekly_period days:<1-31>`](#config-set_weekly_period-days1-31)
+    - [`/config set_weekly weekday:<0-6> time:<HH:MM>`](#config-set_weekly-weekday0-6-timehhmm)
+    - [`/config set_weekly_enabled enabled:<true|false>`](#config-set_weekly_enabled-enabledtruefalse)
+    - [`/config move_study_to_game`](#config-move_study_to_game)
+    - [`/config move_game_to_study`](#config-move_game_to_study)
+    - [`/config dry_run`](#config-dry_run)
+    - [`/config run_now`](#config-run_now)
+  - [`/study` コマンド](#study-コマンド)
+    - [`/study me`](#study-me)
+    - [`/study rank limit:<1-30>`](#study-rank-limit1-30)
+    - [`/study weekly_rank limit:<1-30>`](#study-weekly_rank-limit1-30)
+    - [`/study timer minutes:<1-720> [title]`](#study-timer-minutes1-720-title)
+    - [`/study timer_cancel`](#study-timer_cancel)
+  - [補足仕様](#補足仕様)
 
 ### `/study`
 
@@ -61,6 +81,14 @@
 - 目的: 現在のギルド設定を一覧表示。
 - 主な確認項目: `notify_time`、`timezone`、`excluded_role_ids`、`aggregation_excluded_user_ids`、`maintenance_enabled`、`maintenance_until_epoch`、週次設定。
 - 使いどころ: 設定変更後の確認、障害調査時の現状把握。
+
+<a id="say"></a>
+### `/say message:<text> [channel:<channel>]`
+
+- 目的: 管理者権限または許可ユーザーで任意のメッセージを送信します。
+- 仕様: 送信先チャンネル (`channel`) を指定しない場合は、コマンドを実行したチャンネルに送信されます。
+- 仕様: 実行結果（「メッセージを送信しました。」など）は `ephemeral=True` により実行者のみに表示されます。
+- 例: `/say message:こんにちは channel:#general`
 
 <a id="send"></a>
 ### `/send from_channel:<voice_channel> to_channel:<voice_channel> [except_users]`
